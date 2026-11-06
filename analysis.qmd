@@ -94,7 +94,7 @@ Required packages:
 
 ```{r}
 to_load <- c("dplyr", "tidyr", "purrr", "stringr", "magrittr", "mgcv")
-required <- c("readxl", to_load)
+required <- c("readxl", "bbmle", to_load)
 ```
 
 Installing those that are not installed yet:
@@ -137,6 +137,35 @@ A tuning of `legend()`:
 
 ```{r}
 legend2 <- function(...) legend(..., legend = media, pch = 1, bty = "n", col = cols)
+```
+
+
+## New functions
+
+A tuning of the `bbmle::mle2()` function:
+
+```{r}
+mle3 <- function(...) {
+  bbmle::mle2(..., method = "Nelder-Mead", control = list(maxit = 1e4))
+}
+```
+
+A tuning of the `bbmle::coef()` function:
+
+```{r}
+coef2 <- function(x) exp(bbmle::coef(x))
+```
+
+A tuning of the `bbmle::confint()` function:
+
+```{r}
+confint2 <- function(x) exp(bbmle::confint(x))
+```
+
+A function that excludes values from a vector `x` by their names `e`:
+
+```{r}
+exclude <- function(x, e) x[grep(e, names(x), value = TRUE, invert = TRUE)]
 ```
 
 
@@ -374,5 +403,303 @@ r_values |>
 
 axis(1, ats, labels)
 legend2("topright")
+```
+
+
+
+### Verifications
+
+```{r}
+predictions <- function(data, model, by = 1) {
+  t <- data$time
+  tibble(xs = seq(min(t), max(t), by)) |> 
+    mutate(pred = predict(model, list(time = xs)))
+}
+
+# predictions(models$data[[1]], models$model[[1]])
+```
+
+```{r}
+find_max_growth <- function(df) {
+  df |> 
+    mutate(across(pred, ~ c(NA, diff(.x))),
+           across(xs, ~ c(NA, head(.x, -1) + diff(.x) / 2))) |> 
+    slice(-1) |> 
+    filter(pred == max(pred)) |> 
+    unlist() |> 
+    setNames(c("time", "growth_rate"))
+}
+
+#predictions(models$data[[1]], models$model[[1]]) |> 
+#  find_max_growth()
+```
+
+```{r}
+plot_data_model <- function(data, predictions, time, col) {
+  with(data, plot(time, OD, pch = 19, col = col,
+                  xlab = "time (minutes)", ylab = "log(OD)"))
+  with(predictions, lines(xs, pred, lwd = 2, col = col))
+  abline(v = time, col = 2, lwd = 2)
+}
+```
+
+```{r eval = FALSE}
+inflexions <- od_data2 |> 
+  mutate(across(OD, log)) |> 
+  nest(.by = c(Sample, Medium, replicate)) |> 
+  mutate(model = map(data, ~ gam(OD ~ s(time, k = 20), data = .x, method = "REML"))) |> 
+  mutate(predictions = map2(data, model, ~ predictions(.x, .y)),
+         out         = map(predictions, ~ find_max_growth(.x))) |> 
+  unnest_wider(out)
+```
+
+```{r eval = FALSE}
+inflexions |> 
+  select(data, predictions, time, Medium) |> 
+  pwalk(~ plot_data_model(..1, ..2, ..3, cols[..4]))
+```
+
+
+
+## Growth models
+
+### Utility functions
+
+A function that fits a growth model `m` by maximum-likelihood to data `x` using a
+probability distribution `f`:
+  
+```{r}
+calibrate <- function(x, m, f, start = NULL, k = 1, ...) {
+  if (is.null(start)) start <- m$ini_val(x, k)
+  out <- mle3(m$mLL_factory(x, f), start, ...)
+  out@data <- list(data = x, model = m$model, distribution = f)
+  out
+}
+```
+
+A function that retrieves the probability distribution used from a fitted model `x`:
+  
+```{r}
+get_distr <- function(x) attr(x@data$distribution, "name")
+```
+
+A function that retrieves the growth model used from a fitted model `x`:
+  
+```{r}
+get_model <- function(x) attr(x@data$model, "name")
+```
+
+A function that retrieves the data from a fitted model `x`:
+  
+```{r}
+get_data <- function(x) x@data$data
+```
+
+A function that generates predictions in times `t` from a fitted model `x` and with
+confidence interval `ci`:
+  
+```{r}
+t_vals <- seq(0, 15 * 60, le = 512)
+
+predictions2 <- function(x, t = t_vals, ci = .95) {
+  params <- coef2(x)
+  f <- attr(x@data$distribution, "q")
+  q <- function(mu, lower = FALSE) f((1 - ci) / 2, mu, params["k"], lower.tail = lower)
+  tibble(time = t,
+         fit  = do.call(x@data$model, c(t = list(t), exclude(params, "k"))),
+         lwr  = q(fit, TRUE),
+         upr  = q(fit))
+}
+```
+
+A function that plots the model's prediction:
+
+```{r}
+plot_predictions <- function(x, col = col_M9, alpha = .3, add = FALSE, ...) {
+  with(x, {
+    t <- time / 60
+    if (! add) plot_od(t, fit, type = "n", ...)
+    polygon(c(t, rev(t)), c(lwr, rev(upr)), border = NA, col = adjustcolor(col, alpha))
+    lines(t, fit, col = col, lwd = 2)
+  })
+}
+```
+
+A function that adds data points:
+
+```{r}
+add_data <- function(x, col = col3) {
+  with(get_data(x), points(time / 60, OD, col = col, pch = 19))
+}
+```
+
+Let's combine them:
+  
+```{r}
+plot_fit <- function(pred, fit, ylim = NULL, col_data = col3, col_model = col_M9,
+                     alpha = .3, ...) {
+  if (is.null(ylim)) {
+    OD <- get_data(fit)$OD
+    ylim <- c(min(c(pred$lwr, OD)), max(c(pred$upr, OD)))
+  }
+  plot_predictions(pred, col_model, alpha, ylim = ylim, ...)
+  add_data(fit, col = col_data)
+}
+```
+
+A wrapper:
+  
+```{r}
+plot_fit_and_data <- function(fit, ...) {
+  fit |> 
+    predictions2() |> 
+    plot_fit(fit, ...)
+}
+```
+
+
+
+### Probability distributions
+
+A function that builds probability distribution functions that packages everything we
+need:
+  
+```{r}
+distribution <- function(name, d, q) {
+  attr(d, "q") <- q
+  attr(d, "name") <- name
+  d
+}
+```
+
+Definining the normal probability distribution function:
+  
+```{r}
+normal <- distribution("norm", function(x, mu, k) dnorm(x, mu, k, log = TRUE), 
+                       function(x, mu, k, ...) qnorm(x, mu, k, ...))
+```
+
+Defining the log-normal probability distribution function:
+  
+```{r}
+log_normal <- distribution("lnorm",
+                           function(x, mu, k) dlnorm(x, log(mu) - k^2 / 2, k, log = TRUE), 
+                           function(x, mu, k, ...) qlnorm(x, log(mu) - k^2 / 2, k, ...))
+```
+
+Defining the gamma probability distribution function:
+  
+```{r}
+gammad <- distribution("gamma", function(x, mu, k) dgamma(x, k, k / mu, log = TRUE), 
+                       function(x, mu, k, ...) qgamma(x, k, k / mu, ...))
+```
+
+
+### Growth models
+
+Defining the exponential growth model:
+  
+```{r}
+exponential_growth <- function(t, N0, r) N0 * exp(r * t)
+
+attr(exponential_growth, "name") <- "exponential"
+
+exponential <- list(
+  model = exponential_growth,
+  
+  mLL_factory = function(x, f) {
+    function(N0, r, k) {
+      -sum(f(x$OD, exponential_growth(x$time, exp(N0), exp(r)), exp(k)))
+    }
+  },
+  
+  ini_val = function(df, k = 1) {
+    p <- setNames(c(coef(lm(log(OD) ~ time, df)), k), c("N0", "r", "k"))
+    p[-1] <- log(p[-1])
+    as.list(p)
+  }
+)
+```
+
+Defining the logistic growth model:
+  
+```{r}
+logistic_growth <- function(t, K, r, t0) K / (1 + exp(-(t - t0) * r))
+
+attr(logistic_growth, "name") <- "logistic"
+
+ini_val_logistic = function(df, k = 1) {
+  time <- df$time
+  OD <- df$OD
+  K <- max(OD)
+  halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
+  evaluate <- function(x) approx(time, OD, x)$y
+  distance <- function(x) abs(evaluate(x) - halfK)
+  t0 <- optimize(distance, range(time))$minimum
+  r <- df |> 
+    filter(time < t0) |> 
+    mutate(across(OD, log)) |> 
+    lm(OD ~ time, data = _) |> 
+    coef() |> 
+    extract(2) |> 
+    unname()
+  tibble(K = K, r = r, t0 = t0, k = k)
+}
+
+logistic <- list(
+  model = logistic_growth,
+  
+  mLL_factory = function(x, f) {
+    function(K, r, t0, k) {
+      - sum(f(x$OD, logistic_growth(x$time, exp(K), exp(r), exp(t0)), exp(k)))
+    }
+  },
+  
+  ini_val = function(df, k = 1) {
+    df |> 
+      group_by(replicate) |> 
+      group_modify(~ ini_val_logistic(.x, k)) |> 
+      ungroup() |> 
+      select(-starts_with("replicate")) |> 
+      colMeans() |> 
+      log() |> 
+      as.list()
+  }
+)
+```
+
+### Dev
+
+```{r}
+RMSE <- function(x) - x@details$value / nrow(x@data$data)
+```
+
+```{r}
+aaa <- od_data2 |> 
+  nest(.by = c(Sample, Medium, replicate)) |> 
+  left_join(select(inflexion, Sample, Medium, replicate, time),
+            c("Sample", "Medium", "replicate")) |> 
+  mutate(index_max = map2_int(data, time, ~ first(which(.x$time > .y))))
+```
+
+```{r}
+aaa$data[[1]] |> 
+  slice(-(1:3)) |> 
+  calibrate(logistic, normal) |> 
+  RMSE()
+  
+```
+
+
+
+
+
+
+```{r}
+od_data2 |> 
+  filter(Sample == "W", Medium == "M9", replicate == 1) |> 
+  slice(-(1:3)) |> 
+  calibrate(logistic, normal) |> 
+  RMSE()
 ```
 
