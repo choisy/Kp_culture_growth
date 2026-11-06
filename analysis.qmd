@@ -1,26 +1,378 @@
 ---
-title: "Untitled"
-format: html
-editor: visual
+title: "*K. pneumoniae* growth curves"
+number-sections: true
+format:
+  html:
+    toc: true
+    toc-depth: 4
+editor: source
+editor_options: 
+  chunk_output_type: console
+#bibliography: references.bib
+#csl: the-american-naturalist.csl
 ---
 
-## Quarto
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
-```{r}
-1 + 1
+```{r nojekyll, include = FALSE, eval = FALSE}
+# The code that adds the .nojekyll file to the GitHub repository:
+file <- ".nojekyll"
+file.create(file)
+gert::git_add(file)
+gert::git_commit("Adding the .nojekyll file")
+gert::git_push()
+rm(file)
 ```
 
-You can add options to executable code like this
+```{r run_code, include = FALSE, eval = FALSE}
+# The functions run and re-run the code as a script:
+run_all <- function() {
+  knitr::purl("index.qmd", "tmp.R", documentation = FALSE)
+  source("tmp.R")
+  file.remove("tmp.R")  
+}
 
-```{r}
-#| echo: false
-2 * 2
+rerun_all <- function() {
+  rm(list  = grep("run_all", ls(envir = .GlobalEnv), value = TRUE, invert = TRUE),
+     envir = .GlobalEnv)
+  run_all()
+}
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+```{r setup, include = FALSE}
+# The general setups of knitr.
+par2 <- function(...) par(..., mgp = c(1.5, .5, 0), bty = "n")
+
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par2(plt = c(.105, .97, .15, .95)) else NULL
+  })
+
+eps <- .8
+knitr::opts_chunk$set(margin1    = TRUE,
+                      fig.retina = 2,
+                      fig.align  = "center",
+                      fig.height = eps * 5, # default is 5
+                      fig.width  = eps * 7) # default is 7 and maximum possible is 8.3
+```
+
+
+
+## Parameters
+
+The path to the data:
+
+```{r}
+user <- Sys.getenv("USER")
+
+if (user %in% c("MarcChoisy", "marc")) {  
+  path2data <- paste0(Sys.getenv("HOME"), "/Library/CloudStorage/",
+                      "OneDrive-OxfordUniversityClinicalResearchUnit/",
+                      "GitHub/choisy/Kp_growth_curves/")
+}
+```
+
+The names of the data files:
+
+```{r}
+culture_data <- "CultureData_11523_Van.xlsx"
+serial_dilutions <- "Serial dilution.xlsx"
+```
+
+Colors:
+
+```{r}
+media <- c("M9", "M9+Fe")
+coln <- c("steelblue", "goldenrod")
+alpha <- .3
+```
+
+
+
+## Packages
+
+Required packages:
+
+```{r}
+to_load <- c("dplyr", "tidyr", "purrr", "stringr", "magrittr", "mgcv")
+required <- c("readxl", to_load)
+```
+
+Installing those that are not installed yet:
+
+```{r}
+to_install <- required[! required %in% installed.packages()[,"Package"]]
+if (length(to_install)) install.packages(to_install)
+```
+
+Loading the packages for interactive use:
+
+```{r warning = FALSE, message = FALSE}
+invisible(sapply(to_load, library, character.only = TRUE))
+```
+
+
+
+## Functions
+
+A tuning of `read_excel()`:
+
+```{r}
+read_excel2 <- function(file, ...) readxl::read_excel(paste0(path2data, file), ...)
+```
+
+A tuning of `plot()`
+
+```{r}
+plot_od <- function(...) plot(..., ylab = "optical density OD600 nm")
+```
+
+Colors:
+
+```{r}
+cols <- setNames(coln, media)
+cols_alpha <- setNames(adjustcolor(coln, alpha), media)
+```
+
+A tuning of `legend()`:
+
+```{r}
+legend2 <- function(...) legend(..., legend = media, pch = 1, bty = "n", col = cols)
+```
+
+
+
+## Serial dilution data
+
+A function that formats the serial dilution data:
+
+```{r}
+format_serial_dilutions <- function(x) {
+  x |> mutate(across(c(CFU1, CFU2, CFU3),
+                     ~ .x / (`Inoculum volume (Ml)` * `Countable Dilution`))) |> 
+    select(`OD values`,  CFU1,  CFU2,  CFU3) |> 
+    pivot_longer(-`OD values`) |> 
+    select(-name) |> 
+    rename(OD = `OD values`, concentration = value)
+}
+```
+
+Loading the serial dilution data:
+
+```{r}
+SD_M9 <- serial_dilutions |> 
+  read_excel2("SD M9") |> 
+  format_serial_dilutions()
+
+SD_M9Fe <- paste("SD M9+Fe", 1:3) |> 
+  map_dfr(~ read_excel2(serial_dilutions, .x)) |> 
+  format_serial_dilutions()
+```
+
+A function that formats the data of growing populations:
+
+```{r}
+format_growing_populations <- function(x) {
+  x |>
+    mutate(across(CFU, ~ .x / (`Inoculum volume (Ml)` * `Countable Dilution`))) |> 
+    select(OD_600,  CFU) |> 
+    rename(OD = OD_600, concentration = CFU)
+}
+```
+
+Loading the growing populations data:
+
+```{r}
+GP_M9 <- serial_dilutions |> 
+  read_excel2("GP M9") |> 
+  format_growing_populations()
+
+GP_M9Fe <- serial_dilutions |> 
+  read_excel2("GP M9+Fe") |> 
+  format_growing_populations()
+```
+
+Combining the serial dilution and the growing population data for the `M9` and the
+`Me+Fe` media:
+
+```{r}
+(dilution_data <- list(list(SD_M9,   GP_M9),
+                      list(SD_M9Fe, GP_M9Fe)) |> 
+  map(~ bind_rows(set_names(.x, c("SD", "GP")), .id = "method")) |> 
+  set_names(c("M9", "M9+Fe")) |> 
+  bind_rows(.id = "medium"))
+```
+
+Plotting the dilution data:
+
+```{r}
+#| label: fig-serial_dilution
+#| fig-cap: "Relationship between optical density and bacterial concentration as estimated by CFU counts in two different experimental setups: at regular points in time along a natural growth of the culture (population growth) or by serial dilutions of an initial concentration (serial dilutions). The vertical lines show threshold values of the optical density above which optical density values are not correlated any more with bacterial concentrations."
+
+dilution_data |> 
+  mutate(across(concentration, ~ .x * 1e-6),
+         pch = (method == "SD") + 1,
+         col = cols[medium]) |> 
+  slice_sample(prop = 1) |> 
+  with(plot_od(concentration, OD, pch = pch, col = col,
+               xlab = "concentration (CFU/nL)"))
+
+thresholds <- set_names(c(.48, .75), media)
+abline(h = thresholds, col = cols)
+
+legend("bottomright", ncol = 2, bty = "n",
+       legend = c(media, "population growth", "serial dilutions"),
+       col = c(cols, "black", "black"), pch = c(15, 15, 1, 2))
+```
+
+It shows that above some threshold values of OD, the OD values should not be used to
+quantify any growth.
+
+
+
+## Culture data
+
+Loading the data and expressing time in minutes:
+
+```{r}
+(od_data <- culture_data |>
+  read_excel2() |> 
+  group_by(Sample, Medium) |> 
+  mutate(replicate = row_number()) |>
+  ungroup() |> 
+  pivot_longer(- c(Sample, Medium, replicate), names_to = "time", values_to = "OD") |> 
+  mutate(across(time, ~ .x |>
+                  str_remove(" *h$") |> 
+                  as.numeric() |> 
+                  multiply_by(60) |> 
+                  round() |> 
+                  as.integer())))
+```
+
+Looking at the levels:
+
+```{r}
+(unique_levels <- od_data |> 
+  select(-OD) |> 
+  map(~ sort(unique(.x))))
+```
+
+Checking the regularity of time measurements:
+
+```{r}
+unique(diff(unique_levels$time))
+```
+
+The number of combinations:
+
+```{r}
+unique_levels |> 
+  map_int(length) |> 
+  reduce(`*`)
+```
+
+Number of replicates per combination:
+
+```{r}
+(nb_rep <- od_data |> 
+  group_by(Sample, Medium, time) |> 
+  tally())
+```
+
+Checking that we have all the combinations:
+
+```{r}
+nrow(nb_rep)
+```
+
+Looking at the number of replicates per combination:
+
+```{r}
+nb_rep |> 
+  pull(n) |> 
+  unique()
+```
+
+A function that plots the data:
+
+```{r}
+plot_data <- function(x, ...) {
+  x |>
+    mutate(across(time, ~ divide_by(.x, 60))) |> 
+    slice_sample(prop = 1) |> 
+    with(plot_od(time, OD, xlab = "time (hours)", col = cols_alpha[Medium], ...))
+  legend2("topleft")
+}
+```
+
+Plotting the OD values:
+
+```{r plot_OD_values}
+#| label: fig-culture
+#| fig-cap: "Cultures growth shown as optical densities as a function of time. Horizontal lines show threhsolds above which optical densities cannot be converted into bacterial concentrations anymore. That clearly rules out the exploitation of the some potential K phase of a logistic growth." 
+
+plot_data(od_data)
+thresholds |>
+  (\(x) abline(h = x, col = cols[names(x)]))()
+```
+
+Discarding the data points with OD values below the thresholds:
+
+```{r}
+#| label: fig-serial_dilution2
+#| fig-cap: "Same as @fig-serial_dilution where the data have been filtered to show only the values of optical densities that correlates with bacterial densisty. This is the data that will be used to estimate the exponential growth rates in the section that follows."
+
+od_data2 <- filter_out(od_data, OD > thresholds[Medium])
+plot_data(od_data2)
+```
+
+
+
+## Exponential rates
+
+A function that computes the maximal (i.e. exponential) growth rate in a way that it is
+robust to any latency phase before the exponential growth actually starts:
+
+```{r}
+compute_r <- function(x, k = 20, by = 1) {
+  x |> 
+    mutate(across(OD, log)) |> 
+    gam(OD ~ s(time, k = k), data = _, method = "REML") |> 
+    predict(list(time = seq(min(x$time), max(x$time), by))) |> 
+    diff() |> 
+    max()
+}
+```
+
+Computing the exponential growth rates for each replicate:
+
+```{r}
+r_values <- od_data2 |> 
+  group_by(Sample, Medium, replicate) |> 
+  group_modify(~ tibble(r = compute_r(.x))) |>
+  ungroup()
+```
+
+Plotting the growth rates of replicates arranged by strain and culture medium:
+
+```{r}
+#| label: fig-growth_rates
+#| fig-cap: "Estimated maximal (i.e. exponential) growth rates arranged by strain and culture media."
+
+labels <- unique(r_values$Sample)
+ats <- labels |>
+  (\(x) set_names(seq_along(x), x))()
+
+r_values |> 
+  mutate(across(Sample, ~ jitter(ats[.x])),
+         col = cols[Medium],
+         col_alpha = cols_alpha[Medium]) |> 
+  with({
+    plot(Sample, r, col = col, xaxt = "n",
+         xlab = "strains", ylab = "exponential growth rate (/minute)")
+    points(Sample, r, col = col_alpha, pch = 19)
+  })
+
+axis(1, ats, labels)
+legend2("topright")
+```
+
