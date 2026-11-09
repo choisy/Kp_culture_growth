@@ -427,7 +427,7 @@ find_max_growth <- function(df) {
     slice(-1) |> 
     filter(pred == max(pred)) |> 
     unlist() |> 
-    setNames(c("time", "growth_rate"))
+    setNames(c("infl_t", "growth_r"))
 }
 
 #predictions(models$data[[1]], models$model[[1]]) |> 
@@ -536,7 +536,7 @@ add_data <- function(x, col = col3) {
 Let's combine them:
   
 ```{r}
-plot_fit <- function(pred, fit, ylim = NULL, col_data = col3, col_model = col_M9,
+plot_fit <- function(pred, fit, ylim = NULL, col_data = 2, col_model = 4,
                      alpha = .3, ...) {
   if (is.null(ylim)) {
     OD <- get_data(fit)$OD
@@ -628,23 +628,23 @@ logistic_growth <- function(t, K, r, t0) K / (1 + exp(-(t - t0) * r))
 
 attr(logistic_growth, "name") <- "logistic"
 
-ini_val_logistic = function(df, k = 1) {
-  time <- df$time
-  OD <- df$OD
-  K <- max(OD)
-  halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
-  evaluate <- function(x) approx(time, OD, x)$y
-  distance <- function(x) abs(evaluate(x) - halfK)
-  t0 <- optimize(distance, range(time))$minimum
-  r <- df |> 
-    filter(time < t0) |> 
-    mutate(across(OD, log)) |> 
-    lm(OD ~ time, data = _) |> 
-    coef() |> 
-    extract(2) |> 
-    unname()
-  tibble(K = K, r = r, t0 = t0, k = k)
-}
+#ini_val_logistic = function(df, k = 1) {
+#  time <- df$time
+#  OD <- df$OD
+#  K <- max(OD)
+#  halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
+#  evaluate <- function(x) approx(time, OD, x)$y
+#  distance <- function(x) abs(evaluate(x) - halfK)
+#  t0 <- optimize(distance, range(time))$minimum
+#  r <- df |> 
+#    filter(time < t0) |> 
+#    mutate(across(OD, log)) |> 
+#    lm(OD ~ time, data = _) |> 
+#    coef() |> 
+#    extract(2) |> 
+#    unname()
+#  tibble(K = K, r = r, t0 = t0, k = k)
+#}
 
 logistic <- list(
   model = logistic_growth,
@@ -655,40 +655,137 @@ logistic <- list(
     }
   },
   
+#  ini_val = function(df, k = 1) {
+#    df |> 
+#      group_by(replicate) |> 
+#      group_modify(~ ini_val_logistic(.x, k)) |> 
+#      ungroup() |> 
+#      select(-starts_with("replicate")) |> 
+#      colMeans() |> 
+#      log() |> 
+#      as.list()
+#  }
+  
   ini_val = function(df, k = 1) {
-    df |> 
-      group_by(replicate) |> 
-      group_modify(~ ini_val_logistic(.x, k)) |> 
-      ungroup() |> 
-      select(-starts_with("replicate")) |> 
-      colMeans() |> 
-      log() |> 
-      as.list()
+    time <- df$time
+    OD <- df$OD
+    K <- max(OD)
+    halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
+    evaluate <- function(x) approx(time, OD, x)$y
+    distance <- function(x) abs(evaluate(x) - halfK)
+    t0 <- optimize(distance, range(time))$minimum
+    r <- df |> 
+      filter(time < t0) |> 
+      mutate(across(OD, log)) |> 
+      lm(OD ~ time, data = _) |> 
+      coef() |> 
+      extract(2) |> 
+      unname()
+    map(list(K = K, r = r, t0 = t0, k = k), log)
   }
 )
 ```
 
+
+
 ### Dev
 
+Mean negative log-likelihood:
+
 ```{r}
-RMSE <- function(x) - x@details$value / nrow(x@data$data)
+MNLL <- function(x) x@details$value / nrow(x@data$data)
 ```
+
+```{r}
+stationary_end <- function(data, model, distribution, maxt) {
+  1:maxt |> 
+    map(~ data |> 
+          slice(-(1:.x)) |> 
+          safely(calibrate)(model, distribution)) |>
+    map_dbl(~ ifelse(is.null(.x$result), 1e6, MNLL(.x$result))) |> 
+    which.min()
+}
+
+#stationary_end(aaa$data[[1]], logistic, normal, 18)
+```
+
+```{r}
+od_data3 <- od_data2 |> 
+  nest(.by = c(Sample, Medium, replicate)) |> 
+  left_join(select(inflexions, Sample, Medium, replicate, time),
+            c("Sample", "Medium", "replicate")) |> 
+  mutate(index_max = map2_int(data, time, ~ first(which(.x$time > .y))))
+
+od_data3 |> 
+  mutate(statio_end = map2_dbl(data, index_max, ~ stationary_end(.x, logistic, normal, .y)))
+```
+
+```{r}
+tmp <- od_data2 |> 
+  nest(original_data = c(time, OD)) |> 
+  mutate(GAM = map(original_data, ~ gam(OD ~ s(time, k = 20),
+                                        data = mutate(.x, across(OD, log)),
+                                        method = "REML"))) |> 
+  mutate(predictions = map2(original_data, GAM, ~ predictions(.x, .y)),
+         max_growthr = map(predictions, ~ find_max_growth(.x))) |> 
+  unnest_wider(max_growthr) |> 
+  mutate(infl_i = map2_int(original_data, infl_t, ~ first(which(.x$time > .y)))) #|>
+#  expand_grid(model = list(exponential, logistic),
+#              distr = list(normal, log_normal, gammad))
+```
+
+```{r}
+fff <- function(data, infl_index) {
+  expand_grid(model = list(exponential, logistic),
+              distr = list(normal, log_normal, gammad)) |>
+    mutate(end_station = map2_dbl(model, distr,
+                                  ~ stationary_end(data, .x, .y, infl_index)),
+           fit = pmap(list(end_station, model, distr),
+                      ~ calibrate(data[-(1:..1), ], ..2, ..3)))
+
+}
+
+fff(tmp$original_data[[1]], tmp$infl_i[[1]])
+
+#stationary_end(tmp$original_data[[1]], logistic, normal, tmp$infl_i[[1]])
+```
+
+
 
 ```{r}
 aaa <- od_data2 |> 
   nest(.by = c(Sample, Medium, replicate)) |> 
-  left_join(select(inflexion, Sample, Medium, replicate, time),
+  left_join(select(inflexions, Sample, Medium, replicate, time),
             c("Sample", "Medium", "replicate")) |> 
   mutate(index_max = map2_int(data, time, ~ first(which(.x$time > .y))))
 ```
 
 ```{r}
 aaa$data[[1]] |> 
-  slice(-(1:3)) |> 
+  slice(-(1:2)) |> 
   calibrate(logistic, normal) |> 
-  RMSE()
-  
+  MNLL()
+
+map_dbl(1:14, ~ aaa$data[[1]] |> 
+          slice(-(1:.x)) |> 
+          calibrate(logistic, normal) |> 
+          MNLL()) |> 
+  plot()
+
+with(aaa$data[[1]], plot(time, OD))``
+
+aaa$data[[1]] |>
+#  calibrate(logistic, normal) |>
+  calibrate(exponential, normal) |> 
+  plot_fit_and_data()
 ```
+
+```{r}
+bbb@details
+```
+
+
+
 
 
 
