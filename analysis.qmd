@@ -600,72 +600,116 @@ gammad <- distribution("gamma", function(x, mu, k) dgamma(x, k, k / mu, log = TR
 Defining the exponential growth model:
   
 ```{r}
-exponential_growth <- function(t, N0, r) N0 * exp(r * t)
+#exponential_growth <- function(t, N0, r) N0 * exp(r * t)
+#
+#attr(exponential_growth, "name") <- "exponential"
+#
+#exponential <- list(
+#  model = exponential_growth,
+#  
+#  mLL_factory = function(x, f) {
+#    function(N0, r, k) {
+#      -sum(f(x$OD, exponential_growth(x$time, exp(N0), exp(r)), exp(k)))
+#    }
+#  },
+#  
+#  ini_val = function(df, k = 1) {
+#    p <- setNames(c(coef(lm(log(OD) ~ time, df)), k), c("N0", "r", "k"))
+#    p[-1] <- log(p[-1])
+#    as.list(p)
+#  }
+#)
+```
 
-attr(exponential_growth, "name") <- "exponential"
+```{r}
+growth_model <- function(name, model, mLL_factory, ini_val) {
+  structure(list(name        = name,
+                 model       = model,
+                 mLL_factory = mLL_factory,
+                 ini_val     = ini_val),
+            class = "growth_model")
+}
+```
 
-exponential <- list(
-  model = exponential_growth,
-  
+```{r}
+print.growth_model <- function(x) {
+  cat("Name:", x$name, "\n")
+  cat("Equation: "); print(body(x$model))
+}
+```
+
+```{r}
+names.growth_model <- function(x) x$name
+```
+
+```{r}
+exponential <- growth_model(
+  name = "exponential",
+  model = function(t, N0, r) N0 * exp(r * t),
   mLL_factory = function(x, f) {
     function(N0, r, k) {
       -sum(f(x$OD, exponential_growth(x$time, exp(N0), exp(r)), exp(k)))
     }
   },
-  
   ini_val = function(df, k = 1) {
     p <- setNames(c(coef(lm(log(OD) ~ time, df)), k), c("N0", "r", "k"))
     p[-1] <- log(p[-1])
     as.list(p)
-  }
+  } 
 )
+```
+
+```{r}
+exponential
+class(exponential)
+names(exponential)
 ```
 
 Defining the logistic growth model:
   
 ```{r}
-logistic_growth <- function(t, K, r, t0) K / (1 + exp(-(t - t0) * r))
+#logistic_growth <- function(t, K, r, t0) K / (1 + exp(-(t - t0) * r))
+#
+#attr(logistic_growth, "name") <- "logistic"
+#
+#logistic <- list(
+#  model = logistic_growth,
+#  
+#  mLL_factory = function(x, f) {
+#    function(K, r, t0, k) {
+#      - sum(f(x$OD, logistic_growth(x$time, exp(K), exp(r), exp(t0)), exp(k)))
+#    }
+#  },
+#  
+#  ini_val = function(df, k = 1) {
+#    time <- df$time
+#    OD <- df$OD
+#    K <- max(OD)
+#    halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
+#    evaluate <- function(x) approx(time, OD, x)$y
+#    distance <- function(x) abs(evaluate(x) - halfK)
+#    t0 <- optimize(distance, range(time))$minimum
+#    r <- df |> 
+#      filter(time < t0) |> 
+#      mutate(across(OD, log)) |> 
+#      lm(OD ~ time, data = _) |> 
+#      coef() |> 
+#      extract(2) |> 
+#      unname()
+#    map(list(K = K, r = r, t0 = t0, k = k), log)
+#  }
+#)
+```
 
-attr(logistic_growth, "name") <- "logistic"
-
-#ini_val_logistic = function(df, k = 1) {
-#  time <- df$time
-#  OD <- df$OD
-#  K <- max(OD)
-#  halfK <- K / 2 - min(OD) / 2                    # (second term could be optional)
-#  evaluate <- function(x) approx(time, OD, x)$y
-#  distance <- function(x) abs(evaluate(x) - halfK)
-#  t0 <- optimize(distance, range(time))$minimum
-#  r <- df |> 
-#    filter(time < t0) |> 
-#    mutate(across(OD, log)) |> 
-#    lm(OD ~ time, data = _) |> 
-#    coef() |> 
-#    extract(2) |> 
-#    unname()
-#  tibble(K = K, r = r, t0 = t0, k = k)
-#}
-
-logistic <- list(
-  model = logistic_growth,
-  
+```{r}
+logistic <- growth_model(
+  name = "logistic",
+  model = function(t, K, r, t0) K / (1 + exp(-(t - t0) * r)),
   mLL_factory = function(x, f) {
     function(K, r, t0, k) {
       - sum(f(x$OD, logistic_growth(x$time, exp(K), exp(r), exp(t0)), exp(k)))
     }
   },
-  
-#  ini_val = function(df, k = 1) {
-#    df |> 
-#      group_by(replicate) |> 
-#      group_modify(~ ini_val_logistic(.x, k)) |> 
-#      ungroup() |> 
-#      select(-starts_with("replicate")) |> 
-#      colMeans() |> 
-#      log() |> 
-#      as.list()
-#  }
-  
   ini_val = function(df, k = 1) {
     time <- df$time
     OD <- df$OD
@@ -684,6 +728,12 @@ logistic <- list(
     map(list(K = K, r = r, t0 = t0, k = k), log)
   }
 )
+```
+
+```{r}
+logistic
+class(logistic)
+names(logistic)
 ```
 
 
@@ -710,14 +760,14 @@ stationary_end <- function(data, model, distribution, maxt) {
 ```
 
 ```{r}
-od_data3 <- od_data2 |> 
-  nest(.by = c(Sample, Medium, replicate)) |> 
-  left_join(select(inflexions, Sample, Medium, replicate, time),
-            c("Sample", "Medium", "replicate")) |> 
-  mutate(index_max = map2_int(data, time, ~ first(which(.x$time > .y))))
-
-od_data3 |> 
-  mutate(statio_end = map2_dbl(data, index_max, ~ stationary_end(.x, logistic, normal, .y)))
+#od_data3 <- od_data2 |> 
+#  nest(.by = c(Sample, Medium, replicate)) |> 
+#  left_join(select(inflexions, Sample, Medium, replicate, time),
+#            c("Sample", "Medium", "replicate")) |> 
+#  mutate(index_max = map2_int(data, time, ~ first(which(.x$time > .y))))
+#
+#od_data3 |> 
+#  mutate(statio_end = map2_dbl(data, index_max, ~ stationary_end(.x, logistic, normal, .y)))
 ```
 
 ```{r}
